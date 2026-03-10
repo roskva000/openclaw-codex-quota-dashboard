@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import time
+from urllib.parse import urlparse
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -66,12 +67,14 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/api/refresh-status":
+        path = urlparse(self.path).path
+        if path == "/api/refresh-status":
             return self._json(200, _refresh_status_payload())
         return super().do_GET()
 
     def do_POST(self):
-        if self.path != "/api/refresh":
+        path = urlparse(self.path).path
+        if path != "/api/refresh":
             return self._json(404, {"ok": False, "error": "not found"})
 
         status = _refresh_status_payload()
