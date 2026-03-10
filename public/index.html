@@ -74,31 +74,75 @@
         </div>`).join('');
     }
 
-    async function refreshNow(){
+    let statusPollTimer = null;
+
+    function setRefreshUiRunning(running){
       const btn = document.getElementById('refreshBtn');
-      const status = document.getElementById('status');
-      btn.disabled = true;
-      btn.textContent = '⏳ Yenileniyor...';
-      status.textContent = 'Collector çalışıyor...';
-      try{
-        const res = await fetch('/api/refresh', { method:'POST' });
-        const data = await res.json();
-        if(!res.ok || !data.ok){
-          if(res.status === 409) throw new Error('Başka bir yenileme çalışıyor, birkaç saniye sonra tekrar dene');
-          throw new Error(data.error || 'Refresh başarısız');
-        }
-        await load();
-        status.textContent = 'Güncellendi ✅';
-      }catch(e){
-        status.textContent = 'Hata: ' + e.message;
-      }finally{
+      if(running){
+        btn.disabled = true;
+        btn.textContent = '⏳ Yenileniyor...';
+      }else{
         btn.disabled = false;
         btn.textContent = '🔄 Refresh';
       }
     }
 
+    async function pollRefreshStatus(){
+      const status = document.getElementById('status');
+      try{
+        const res = await fetch('/api/refresh-status?ts=' + Date.now());
+        const data = await res.json();
+        if(!res.ok || !data.ok) throw new Error('status okunamadı');
+
+        if(data.running){
+          setRefreshUiRunning(true);
+          status.textContent = 'Collector çalışıyor... (sayfayı yenilesen de devam eder)';
+          return true;
+        }
+
+        setRefreshUiRunning(false);
+
+        if(data.lastExitCode === 0){
+          await load();
+          status.textContent = 'Güncellendi ✅';
+        }else if(typeof data.lastExitCode === 'number' && data.lastExitCode !== 0){
+          status.textContent = 'Hata: collector başarısız oldu';
+        }
+        return false;
+      }catch(e){
+        status.textContent = 'Hata: ' + e.message;
+        setRefreshUiRunning(false);
+        return false;
+      }
+    }
+
+    async function refreshNow(){
+      const status = document.getElementById('status');
+      setRefreshUiRunning(true);
+      status.textContent = 'Collector başlatılıyor...';
+      try{
+        const res = await fetch('/api/refresh', { method:'POST' });
+        const data = await res.json();
+        if(!res.ok || !data.ok) throw new Error(data.error || 'Refresh başarısız');
+
+        if(statusPollTimer) clearInterval(statusPollTimer);
+        statusPollTimer = setInterval(async () => {
+          const running = await pollRefreshStatus();
+          if(!running){
+            clearInterval(statusPollTimer);
+            statusPollTimer = null;
+          }
+        }, 2000);
+
+        await pollRefreshStatus();
+      }catch(e){
+        status.textContent = 'Hata: ' + e.message;
+        setRefreshUiRunning(false);
+      }
+    }
+
     document.getElementById('refreshBtn').addEventListener('click', refreshNow);
-    load().catch(e => { document.getElementById('status').textContent = 'Hata: ' + e.message; });
+    load().then(() => pollRefreshStatus()).catch(e => { document.getElementById('status').textContent = 'Hata: ' + e.message; });
   </script>
 </body>
 </html>

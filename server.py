@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import time
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -18,6 +19,40 @@ if BIND_HOST == "auto":
 if not BIND_HOST:
     BIND_HOST = "127.0.0.1"
 
+REFRESH_STATE = {
+    "proc": None,
+    "startedAt": None,
+    "lastExitCode": None,
+    "lastError": None,
+    "lastFinishedAt": None,
+}
+
+
+def _refresh_status_payload():
+    proc = REFRESH_STATE["proc"]
+    if proc is not None:
+        rc = proc.poll()
+        if rc is not None:
+            try:
+                _stdout, stderr = proc.communicate(timeout=0.1)
+            except Exception:
+                stderr = ""
+            REFRESH_STATE["proc"] = None
+            REFRESH_STATE["lastExitCode"] = rc
+            REFRESH_STATE["lastError"] = (stderr or "")[-1200:] if rc != 0 else None
+            REFRESH_STATE["lastFinishedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+    running = REFRESH_STATE["proc"] is not None
+    return {
+        "ok": True,
+        "running": running,
+        "startedAt": REFRESH_STATE["startedAt"],
+        "lastExitCode": REFRESH_STATE["lastExitCode"],
+        "lastError": REFRESH_STATE["lastError"],
+        "lastFinishedAt": REFRESH_STATE["lastFinishedAt"],
+    }
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=PUBLIC_DIR, **kwargs)
@@ -30,28 +65,31 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self):
+        if self.path == "/api/refresh-status":
+            return self._json(200, _refresh_status_payload())
+        return super().do_GET()
+
     def do_POST(self):
         if self.path != "/api/refresh":
             return self._json(404, {"ok": False, "error": "not found"})
+
+        status = _refresh_status_payload()
+        if status.get("running"):
+            return self._json(202, {"ok": True, "running": True, "message": "collector already running"})
+
         try:
-            proc = subprocess.run(["/usr/bin/env", "bash", COLLECTOR], capture_output=True, text=True, timeout=240)
-            if proc.returncode != 0:
-                if proc.returncode == 75:
-                    return self._json(409, {
-                        "ok": False,
-                        "error": "collector busy",
-                        "code": proc.returncode,
-                        "stderr": (proc.stderr or "")[-1200:],
-                    })
-                return self._json(500, {
-                    "ok": False,
-                    "error": "collector failed",
-                    "code": proc.returncode,
-                    "stderr": (proc.stderr or "")[-1200:],
-                })
-            return self._json(200, {"ok": True})
-        except subprocess.TimeoutExpired:
-            return self._json(504, {"ok": False, "error": "collector timeout"})
+            proc = subprocess.Popen(
+                ["/usr/bin/env", "bash", COLLECTOR],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            REFRESH_STATE["proc"] = proc
+            REFRESH_STATE["startedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            REFRESH_STATE["lastExitCode"] = None
+            REFRESH_STATE["lastError"] = None
+            return self._json(202, {"ok": True, "running": True, "started": True})
         except Exception as e:
             return self._json(500, {"ok": False, "error": str(e)})
 
